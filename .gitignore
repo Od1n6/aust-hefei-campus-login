@@ -1,0 +1,28 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller 构建产物（含本机绝对路径，绝对不能提交）
+build/
+build_*/
+dist/
+dist_*/
+*.spec
+*.toc
+*.pyz
+*.pkg
+warn-*.txt
+xref-*.html
+
+# 本地配置与日志（含账号信息，绝对不能提交）
+config.json
+login.log
+*.bak
+*_realbak
+
+# 编辑器
+.vscode/
+.idea/
