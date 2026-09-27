@@ -1,88 +1,37 @@
 # aust-hefei-campus-login
 
-One-click login for the AUST Hefei campus network.
+Captive-portal authentication for the AUST Hefei campus network, reduced to a single action.
 
 ![Screenshot](screenshots/main.png)
 
-The campus portal runs Dr.COM's eportal stack. Rather than driving a browser through
-the login form, this talks to the portal's own JSONP endpoint directly, so a session
-comes up in about a second instead of ten to thirty.
+The portal runs Dr.COM eportal. This does not drive a browser through the login form. It
+issues the portal's own authentication request directly, which takes about a second
+instead of tens of seconds. Credentials are supplied once and held locally under Windows
+DPAPI.
 
-Credentials are entered once and kept locally, encrypted with Windows DPAPI.
+## Status
 
----
-
-> ## Beta
->
-> This is a personal utility, published as-is. It has only ever been exercised against
-> a single portal deployment, on a single machine, and campus networks get reconfigured
-> without warning. Expect rough edges, and don't depend on it for anything that matters.
-> If it breaks, the log file will usually say why — patches are welcome.
-
----
+Beta. The implementation targets a single portal deployment and has been validated only
+against it. Portal software is upgraded without notice and its interface is not
+contractual. Assume it can break; `login.log` records each exchange verbatim, which is
+usually enough to identify why.
 
 ## Scope
 
-Written for the **Hefei campus**: portal `172.24.34.2`, student mobile egress (`@hfcmcc`).
+Hefei campus — portal `172.24.34.2`, student mobile egress `@hfcmcc`.
 
-It does **not** apply to the Huainan campus. That campus runs a different portal
-(`10.255.0.19` at the time of writing) with a different set of egress suffixes, and is
-unreachable from the Hefei network. Passing these parameters over there will not work.
+The Huainan campus is a separate deployment: different portal address, different egress
+table, no route between the two. Nothing here transfers to it.
 
-The interface is in Chinese, which is what the intended users read.
+## Operation
 
-## Requirements
-
-- Windows 10 or 11
-- Python 3.9+ to run from source, or nothing at all to run the packaged build
-- `customtkinter` for the GUI
-
-## Running it
-
-```bash
-pip install -r requirements.txt
-python aust_campus.py
-```
-
-Fill in your student ID, password and egress once. After that the window opens with the
-fields already populated and a single button does the rest.
-
-To build a standalone executable:
-
-```powershell
-pip install pyinstaller customtkinter
-
-# Directory build — faster start, recommended for installing locally
-pyinstaller --noconfirm --onedir --noconsole --name AUSTHFCampus `
-    --collect-all customtkinter `
-    --exclude-module numpy --exclude-module scipy --exclude-module pandas `
-    aust_campus.py
-```
-
-The `--exclude-module` flags are not optional in practice. Pillow declares numpy as an
-optional dependency, and if numpy happens to be installed, PyInstaller will pull it —
-along with its bundled OpenBLAS — into the output. That turns a 15 MB build into a 73 MB
-one for no benefit.
-
-### Command line
-
-| Flag | Effect |
-| --- | --- |
-| *(none)* | Open the window |
-| `--silent` | Authenticate without showing a window; suitable for a scheduled task |
-| `--check` | Report network state and exit. Sends no authentication request |
-| `--dry-run` | Print the request that would be sent, without sending it |
-| `--force` | Re-authenticate even when the connection is already up |
-
-## How it works
-
-A session is one GET against the portal's JSONP endpoint:
+Authentication is one GET:
 
 ```
 GET http://172.24.34.2:801/eportal/portal/login
       ?callback=dr1003
       &login_method=1
-      &user_account=,0,<student-id><egress>     # ,0, desktop prefix — ,1, on mobile
+      &user_account=,0,<student-id><egress>
       &user_password=<password>
       &wlan_user_ip=<local campus address>
       &wlan_user_ipv6=
@@ -93,18 +42,14 @@ GET http://172.24.34.2:801/eportal/portal/login
       &lang=zh
 ```
 
-The reply is `dr1003({"result":1,...})`. A `result` of `1` or `ok` means the session is
-up; `ret_code: 2`, meaning the address was already online, is treated the same way.
+`,0,` prefixes a desktop client; mobile clients send `,1,`. The reply is JSONP —
+`dr1003({"result":1,...})`. A `result` of `1` or `ok` establishes a session; `ret_code: 2`
+reports that the address was already online and is handled identically.
 
-None of this is guesswork. Every parameter was read out of the JavaScript the portal
-hands to browsers:
-
-- `a41.js` defines `portal_api`, the terminal probe and the page loader
-- `a40.js` holds `login.login_portal()`, where the request is assembled
-- the active scheme page, `extern/<program_index>/<page_index>/pc.js`, carries the
-  egress dropdown
-
-That dropdown is the source of the egress suffix:
+Every parameter comes from the portal's own client code, not from inspection of traffic.
+`a41.js` supplies the endpoint and the terminal probe; `a40.js` contains
+`login.login_portal()`, where the request is assembled; the active scheme page
+`extern/<program_index>/<page_index>/pc.js` carries the egress table:
 
 ```html
 <select name="ISP_select">
@@ -115,64 +60,92 @@ That dropdown is the source of the egress suffix:
 </select>
 ```
 
-A second endpoint, `drcom/chkstatus`, returns the machine's own address on the campus
-network. That address is read at runtime, so a new DHCP lease needs no configuration
-change.
+The host's own address is not configured but read at runtime from `drcom/chkstatus`, so a
+new DHCP lease requires no change.
 
-### Detecting an existing session
+### Connectivity detection
 
-`chkstatus` is not a reliable indicator of connectivity on this deployment — it reports
-`result: 0` on a machine that is demonstrably online — so connectivity is probed over
-HTTPS with ordinary certificate validation instead.
+`chkstatus` is not a usable indicator on this deployment — it returns `result: 0` from a
+host that is demonstrably online. Connectivity is established instead over HTTPS with
+ordinary certificate validation.
 
-The reasoning: an unauthenticated portal can intercept plain HTTP and serve a login page,
-but it cannot present a valid certificate for `www.163.com`. A TLS failure therefore
-means "not authenticated", with none of the false positives a status-code check produces.
-Hosts that the campus whitelists without authentication (`msftncsi.com`,
-`captive.apple.com`, `detectportal.firefox.com` and relatives) are deliberately avoided,
-since they respond either way.
+An unauthenticated portal can intercept HTTP and serve a login page; it cannot present a
+valid certificate for a public hostname. A TLS failure is therefore a sound negative
+signal where a status-code test is not. Hosts the campus whitelists before authentication
+— `msftncsi.com`, `captive.apple.com`, `detectportal.firefox.com` and their kin — answer
+in either state, and are excluded for that reason.
 
-The practical consequence is that when the machine already has internet access, the tool
-sends nothing to the portal at all.
+The consequence is that on a host which already has connectivity, the tool contacts the
+portal not at all.
 
-### Design notes
+### Behaviour
 
-- **No logout path.** The program only ever authenticates. It will not tear down a
-  session, and re-running it on a live connection is a no-op.
-- **Failures are verbose.** Retries cover transient errors; a password rejected on its
-  trailing full-width versus half-width exclamation mark is retried with the other form;
-  whatever the portal says is written to the log verbatim.
-- **No telemetry.** Nothing leaves the machine except requests to the campus portal and
-  the connectivity probes.
+- Authentication only. There is no logout path, and running against a live session is a
+  no-op.
+- Transient failures are retried. A password rejected on its trailing punctuation is
+  retried with the alternate form — full-width `U+FF01` against half-width `U+0021`.
+- The portal's response is logged unmodified. Nothing is transmitted anywhere except the
+  campus portal and the connectivity probes.
 
-## Adapting it to another campus
+## Building
 
-The same approach works at any campus running Dr.COM eportal. In outline:
+```
+pip install -r requirements.txt
+python aust_campus.py
+```
 
-1. Connect without authenticating and let the browser land on the login page. Note the
-   host and port.
-2. Run the probe that ships with this repository:
-   ```bash
-   python tools/probe_portal.py 10.0.0.1 801
-   ```
-   It reads `chkstatus` and `loadConfig` and prints the scheme identifiers, the
-   authentication method and the account suffix handling. All of it is read-only.
-3. Fetch the scheme page named in the output and look for `ISP_select` or `ISP_radio`.
-   The `value` attributes are the egress suffixes.
-4. Update `PORTAL_HOST`, `PORTAL_PORT` and `CHANNELS` at the top of `aust_campus.py`.
+To produce a standalone executable:
 
-Note that some deployments — including this university's Huainan campus — run an older
-Dr.COM build, where login is a form POST to `/a79.htm` or a GET to `/drcom/login`. This
-project targets the eportal v4 JSONP interface only.
+```powershell
+pip install pyinstaller customtkinter
 
-## Configuration and logs
+pyinstaller --noconfirm --onedir --noconsole --name AUSTHFCampus `
+    --collect-all customtkinter `
+    --exclude-module numpy --exclude-module scipy --exclude-module pandas `
+    aust_campus.py
+```
 
-Both live under `%APPDATA%\CampusNetLogin`:
+The `--exclude-module` flags are load-bearing. Pillow declares numpy as an optional
+dependency; when numpy is present, PyInstaller follows it and bundles the accompanying
+OpenBLAS, turning a 15 MB build into a 73 MB one to no purpose.
 
-- `config.json` — account and settings. The password field holds a DPAPI blob, readable
-  only by the Windows account that wrote it. With "remember password" unchecked, the
-  password is never written to disk.
-- `login.log` — a timestamped record of everything the tool did.
+### Command line
+
+| Flag | Effect |
+| --- | --- |
+| *(none)* | Open the window |
+| `--silent` | Authenticate without a window; suited to a scheduled task |
+| `--check` | Report network state and exit, issuing no authentication request |
+| `--dry-run` | Print the request that would be sent, without sending it |
+| `--force` | Re-authenticate against a live session |
+
+## Porting to another deployment
+
+The method generalises to any Dr.COM eportal deployment.
+[tools/probe_portal.py](tools/probe_portal.py) performs the reconnaissance, reading
+`chkstatus` and `loadConfig` and reporting the scheme identifiers, authentication method
+and suffix handling. It issues no authentication request.
+
+```bash
+python tools/probe_portal.py <portal-host> [port]
+```
+
+The scheme page named in its output carries the egress table; the `value` attributes are
+the suffixes. `PORTAL_HOST`, `PORTAL_PORT` and `CHANNELS` at the head of `aust_campus.py`
+are the only values that require changing.
+
+Deployments predating eportal v4 — this university's Huainan campus among them —
+authenticate by form POST to `/a79.htm` or GET to `/drcom/login`. This project does not
+address them.
+
+## Files
+
+| Path | Contents |
+| --- | --- |
+| `config.json` | Account and settings, under `%APPDATA%\CampusNetLogin`. The password field holds a DPAPI blob, readable only by the Windows account that wrote it; with "remember password" unchecked it is never written at all. |
+| `login.log` | Timestamped record of every action, in the same directory. |
+
+The interface is in Chinese. The intended users read Chinese.
 
 ## License
 
